@@ -49,6 +49,7 @@ DATASETS: list[Dataset] = [
     Dataset("schedules",    lambda s: nfl.load_schedules(seasons=s),      "nflverse/schedules"),
     Dataset("player_stats", lambda s: nfl.load_player_stats(seasons=s),   "nflverse/player_stats"),
     Dataset("rosters",      lambda s: nfl.load_rosters_weekly(seasons=s), "nflverse/rosters_weekly"),
+    Dataset("injuries",     lambda s: nfl.load_injuries(seasons=s),       "nflverse/injuries"),
     Dataset("ngs_passing",   _ngs("passing"),   "nflverse/ngs_passing",   first_season=NGS_FIRST_SEASON),
     Dataset("ngs_rushing",   _ngs("rushing"),   "nflverse/ngs_rushing",   first_season=NGS_FIRST_SEASON),
     Dataset("ngs_receiving", _ngs("receiving"), "nflverse/ngs_receiving", first_season=NGS_FIRST_SEASON),

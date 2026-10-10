@@ -30,6 +30,7 @@ features. Final scores/results feed **targets only** and never enter the feature
 | **Rest** | `rest_days` per team (capped 14 for week 1), `rest_days_diff` | |
 | **Travel** | `away_travel_miles` (haversine from stadium coords), `travel_diff` | home = 0 |
 | **Elo** | `home_elo_pre`, `away_elo_pre`, `elo_diff` | K=20, HFA=55, 0.75 offseason regression |
+| **Injuries** | `injury_index_diff`, `qb_out_diff` (+ raw home/away) | position×status-weighted weekly report; QB-out flag |
 | **Context** | `div_game`, `is_dome`, `is_neutral_site`, `home_field_advantage`, `temp`, `wind` | |
 | **Market** | `spread_line`, `total_line` | the Vegas baseline we'll benchmark against |
 
@@ -42,6 +43,18 @@ is what the model keys on.
 | `home_win` | `result > 0` (ties → null) | binary classification |
 | `home_covered` | `result > spread_line` (push → null) | binary classification |
 | `target_margin` | `result` (home − away points) | regression (spread) |
+
+## Injury features (weekly report, not a live feed)
+`injury_index` = Σ (position weight × game-status severity) over a team's weekly injury report
+(QB=4.0 … LB=1.0; Out=1.0, Doubtful=0.75, Questionable=0.35), plus a `qb_out` flag. The report is
+published during practice week — **pre-kickoff, so joining a week's report to that week's game is
+not leakage**. It is *not* a true real-time inactives feed (those post ~90 min pre-game).
+
+**Univariate signal is strong:** home win rate is 55% overall, **43% when the home QB is Out** and
+**66% when the away QB is Out**. **Aggregate lift is small**, though: adding injuries moved win AUC
+only ~0.6694 → 0.6705, because `spread_line` already prices injuries in (Vegas adjusts the line) and
+QB-outs occur in only ~220 of 3,300 games. The honest lesson: raw injury signal helps most where you
+*aren't* also handed the market's pre-digested version of it.
 
 ## Engineering notes
 - **Team-identity conform** (`src/nfl/teams.py`): SD→LAC, STL→LAR, OAK→LV. Without this the

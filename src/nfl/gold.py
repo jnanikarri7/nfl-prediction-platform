@@ -25,6 +25,13 @@ from .config import GOLD_DIR, SILVER_DIR
 from .stadiums import TEAM_COORDS
 
 EMA_SPANS = (4, 8)
+# Injury model: a team-week injury index weights each listed player by position
+# importance x game-status severity. The weekly report is published pre-kickoff,
+# so joining a week's report to that week's game is NOT leakage.
+POS_WEIGHT = {"QB": 4.0, "WR": 1.5, "RB": 1.2, "TE": 1.0, "T": 1.3, "LT": 1.3,
+              "RT": 1.3, "G": 1.1, "C": 1.1, "OL": 1.2, "EDGE": 1.3, "DE": 1.2,
+              "DT": 1.1, "CB": 1.3, "S": 1.1, "FS": 1.1, "SS": 1.1, "LB": 1.0}
+STATUS_WEIGHT = {"Out": 1.0, "Doubtful": 0.75, "Questionable": 0.35}
 ELO_K = 20.0
 ELO_HFA = 55.0          # home-field advantage in Elo points
 ELO_BASE = 1500.0
@@ -163,6 +170,29 @@ def _travel(sched: pl.DataFrame) -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# 4b. Injury index per team-week (pre-game report; not leakage).
+# ---------------------------------------------------------------------------
+def _injury_team_week() -> pl.DataFrame:
+    inj = pl.read_delta(str(SILVER_DIR / "injuries"))
+    # Align join-key dtypes with schedules (season/week are i32 there).
+    inj = inj.with_columns(pl.col("season").cast(pl.Int32), pl.col("week").cast(pl.Int32))
+    inj = inj.with_columns(
+        pl.col("position").fill_null("UNK")
+          .replace_strict(POS_WEIGHT, default=0.8, return_dtype=pl.Float64).alias("pw"),
+        pl.col("report_status").fill_null("None")
+          .replace_strict(STATUS_WEIGHT, default=0.0, return_dtype=pl.Float64).alias("sw"),
+    ).with_columns(
+        (pl.col("pw") * pl.col("sw")).alias("iw"),
+        ((pl.col("position") == "QB")
+         & pl.col("report_status").is_in(["Out", "Doubtful"])).alias("is_qb_out"),
+    )
+    return inj.group_by("season", "week", "team").agg(
+        pl.col("iw").sum().round(3).alias("injury_index"),
+        pl.col("is_qb_out").max().cast(pl.Int8).alias("qb_out"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 5. Assemble gold_game_features.
 # ---------------------------------------------------------------------------
 def build_gold() -> pl.DataFrame:
@@ -187,12 +217,27 @@ def build_gold() -> pl.DataFrame:
         "temp", "wind", "is_played", "result", "total",
     )
 
+    inj = _injury_team_week()
+    home_inj = inj.rename({"team": "home_team", "injury_index": "home_injury_index",
+                           "qb_out": "home_qb_out"})
+    away_inj = inj.rename({"team": "away_team", "injury_index": "away_injury_index",
+                           "qb_out": "away_qb_out"})
+
     g = (
         base
         .join(home_feats, on="game_id", how="left")
         .join(away_feats, on="game_id", how="left")
         .join(elo, on="game_id", how="left")
         .join(travel, on="game_id", how="left")
+        .join(home_inj, on=["season", "week", "home_team"], how="left")
+        .join(away_inj, on=["season", "week", "away_team"], how="left")
+    )
+    # Teams absent from a week's report have no listed injuries -> 0.
+    g = g.with_columns(
+        pl.col("home_injury_index").fill_null(0.0),
+        pl.col("away_injury_index").fill_null(0.0),
+        pl.col("home_qb_out").fill_null(0),
+        pl.col("away_qb_out").fill_null(0),
     )
 
     # Home-minus-away deltas (what the model actually keys on).
@@ -202,7 +247,9 @@ def build_gold() -> pl.DataFrame:
     ]
     g = g.with_columns(
         delta_exprs
-        + [(pl.col("away_travel_miles") - pl.col("home_travel_miles")).alias("travel_diff")]
+        + [(pl.col("away_travel_miles") - pl.col("home_travel_miles")).alias("travel_diff"),
+           (pl.col("home_injury_index") - pl.col("away_injury_index")).alias("injury_index_diff"),
+           (pl.col("home_qb_out") - pl.col("away_qb_out")).alias("qb_out_diff")]
     )
 
     # Targets (null on unplayed games -> inference set). Pushes/ties -> null.

@@ -153,6 +153,28 @@ def build_silver_player_stats() -> pl.DataFrame:
     return df
 
 
+def build_silver_injuries() -> pl.DataFrame:
+    df = _read_bronze("injuries")
+    before = df.height
+    key = [c for c in ["season", "week", "team", "gsis_id"] if c in df.columns]
+    df = (
+        df
+        .with_columns(normalize_team("team"))
+        .unique(subset=key, keep="first")
+        .select([c for c in ["season", "week", "team", "gsis_id", "position",
+                             "full_name", "report_status", "practice_status",
+                             "report_primary_injury"] if c in df.columns])
+    )
+    report = dq.DataQualityReport("silver_injuries")
+    if key:
+        report.add(dq.expect_unique(df, key))
+    report.add(dq.expect_not_null(df, "team"))
+    report.print_summary()
+    report.raise_if_failed()
+    print(f"  silver_injuries: {before:,} -> {df.height:,} rows")
+    return df
+
+
 def run() -> dict[str, int]:
     SILVER_DIR.mkdir(parents=True, exist_ok=True)
     print("=== Silver build ===")
@@ -162,6 +184,9 @@ def run() -> dict[str, int]:
     _write_silver(sched, "schedules", ["game_id", "week"])
     ps = build_silver_player_stats()
     _write_silver(ps, "player_stats", ["player_id", "week"])
-    counts = {"pbp": pbp.height, "schedules": sched.height, "player_stats": ps.height}
+    inj = build_silver_injuries()
+    _write_silver(inj, "injuries", ["team", "week"])
+    counts = {"pbp": pbp.height, "schedules": sched.height,
+              "player_stats": ps.height, "injuries": inj.height}
     print(f"[DONE] Silver complete: {counts}")
     return counts
