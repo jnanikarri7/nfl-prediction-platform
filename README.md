@@ -119,6 +119,7 @@ python scripts/run_bronze.py        # ingest 2015-present  (~250 MB, a few min)
 python scripts/run_silver.py        # clean + DQ gate + Z-ORDER
 python scripts/run_gold.py          # leakage-safe features
 python scripts/run_train.py         # LightGBM + XGBoost + MLflow
+python scripts/run_predict.py       # load champion from registry, predict upcoming games
 mlflow ui --backend-store-uri sqlite:///mlflow.db        # browse experiments
 ```
 
