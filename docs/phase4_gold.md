@@ -25,6 +25,8 @@ features. Final scores/results feed **targets only** and never enter the feature
 | Family | Features | Notes |
 |---|---|---|
 | **Rolling EPA** | off/def EPA per play, pass & rush split, EMA span 4 & 8 | the core signal |
+| **Opponent-adjusted EPA** | off/def EPA adjusted by opponent pre-game strength, EMA 4 & 8 | removes schedule confounding |
+| **QB value** | starter's rolling passing-EPA/play (span 10), replacement floor | `qb_value_diff`; the biggest single team-strength swing |
 | **CPOE** | rolling off_cpoe EMA 4 & 8 | passing efficiency over expected |
 | **Turnovers** | giveaways / takeaways per game (≈ per 60 min), EMA 4 & 8 | |
 | **Rest** | `rest_days` per team (capped 14 for week 1), `rest_days_diff` | |

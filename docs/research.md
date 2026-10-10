@@ -53,6 +53,26 @@ spread→Normal baseline, confirming the market ceiling; (b) **isotonic calibrat
 (cal Brier 0.217 > raw 0.214) because a single ~250-game calibration season overfits — the raw
 Normal probabilities are already well-calibrated. Next: pool more calibration data or use Platt.
 
+## Tier 2 — implemented (continuous QB value + opponent-adjusted EPA)
+- **QB value** (`gold._qb_pregame_value`): each starter's rolling (span-10) passing-EPA/play, shifted
+  pre-game, joined via `home_qb_id`/`away_qb_id`; replacement level (15th pctl) for debuts/backups.
+- **Opponent-adjusted EPA** (`gold._team_timeline`): each game's raw off/def EPA minus the opponent's
+  pre-game strength (EMA-8), then rolled — removes schedule confounding. Leakage-safe (opponent EMAs
+  are pre-game).
+
+Both carry strong univariate signal (corr with home win: `qb_value_diff` 0.235, `off_epa_adj_ema8_diff`
+0.248). Impact on models:
+
+| Model | Win AUC | Brier |
+|---|---|---|
+| Baseline GBM (pre-Tier-2) → +Tier-2 | 0.669 → **0.677** | — |
+| Market-anchored (pre-Tier-2) → +Tier-2 | 0.714 → **0.717** | 0.214 → **0.213** |
+| Vegas ceiling | 0.726 | 0.211 |
+
+**Finding (consistent with injuries):** the features help the *standalone* model more than the
+market-anchored one, because the line already prices QB quality and schedule in. The market-anchored
+model is now within ~0.01 AUC / ~0.002 Brier of Vegas — effectively at the ceiling.
+
 ## Realistic ceiling (the portfolio win condition)
 Match the market (~0.72 AUC, ~0.19 Brier) and be **well-calibrated**, with an honest CLV writeup —
 not "beat Vegas." NFL outcomes are dominated by game-to-game randomness and the market aggregates

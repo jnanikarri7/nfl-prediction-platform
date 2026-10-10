@@ -78,19 +78,18 @@ def _team_timeline(team_game: pl.DataFrame, sched: pl.DataFrame) -> pl.DataFrame
         .with_columns(
             pl.col("gameday").str.to_date().alias("game_date"),
             (pl.col("team") == pl.col("home_team")).alias("is_home"),
+            pl.when(pl.col("team") == pl.col("home_team"))
+              .then(pl.col("away_team")).otherwise(pl.col("home_team")).alias("opponent"),
         )
         .sort("team", "game_date", "game_id")
     )
 
     # Rolling EMAs over PRIOR games only (ewm then shift(1) within team).
-    ema_exprs = []
-    for span in EMA_SPANS:
-        for col in EMA_BASE_COLS:
-            ema_exprs.append(
-                pl.col(col).ewm_mean(span=span, adjust=False, min_samples=1)
-                  .shift(1).over("team").alias(f"{col}_ema{span}")
-            )
-
+    ema_exprs = [
+        pl.col(col).ewm_mean(span=span, adjust=False, min_samples=1)
+          .shift(1).over("team").alias(f"{col}_ema{span}")
+        for span in EMA_SPANS for col in EMA_BASE_COLS
+    ]
     # Days of rest within a season; new-season week 1 gets the cap.
     rest = (
         pl.when(pl.col("season") == pl.col("season").shift(1).over("team"))
@@ -99,9 +98,28 @@ def _team_timeline(team_game: pl.DataFrame, sched: pl.DataFrame) -> pl.DataFrame
           .clip(0, MAX_REST_DAYS)
           .alias("rest_days")
     )
+    tg = tg.with_columns(ema_exprs + [rest])
 
-    feat_cols = [f"{c}_ema{s}" for s in EMA_SPANS for c in EMA_BASE_COLS]
-    return tg.with_columns(ema_exprs + [rest]).select(
+    # Opponent-adjusted EPA: subtract the opponent's PRE-GAME strength (EMA-8) from
+    # this game's raw EPA, then roll. Fixes schedule confounding (the "flat features"
+    # the importance analysis exposed). Opponent EMAs are pre-game -> leakage-safe.
+    opp = (tg.select("game_id", "team", "off_epa_ema8", "def_epa_ema8")
+             .rename({"team": "opponent", "off_epa_ema8": "opp_off_str",
+                      "def_epa_ema8": "opp_def_str"}))
+    tg = tg.join(opp, on=["game_id", "opponent"], how="left").with_columns(
+        (pl.col("off_epa") - pl.col("opp_def_str")).alias("adj_off_game"),
+        (pl.col("def_epa") - pl.col("opp_off_str")).alias("adj_def_game"),
+    ).sort("team", "game_date", "game_id")
+    adj_exprs = [
+        pl.col(f"adj_{side}_game").ewm_mean(span=sp, adjust=False, min_samples=1)
+          .shift(1).over("team").alias(f"{side}_epa_adj_ema{sp}")
+        for sp in EMA_SPANS for side in ("off", "def")
+    ]
+    tg = tg.with_columns(adj_exprs)
+
+    feat_cols = ([f"{c}_ema{s}" for s in EMA_SPANS for c in EMA_BASE_COLS]
+                 + [f"{side}_epa_adj_ema{sp}" for sp in EMA_SPANS for side in ("off", "def")])
+    return tg.select(
         ["game_id", "team", "season", "week", "is_home", "rest_days"] + feat_cols
     )
 
@@ -193,6 +211,32 @@ def _injury_team_week() -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# 4c. Continuous QB value — rolling passing-EPA/play of the starter (pre-game).
+# ---------------------------------------------------------------------------
+QB_EMA_SPAN = 10          # QB form stabilizes over ~10 games
+QB_MIN_DROPBACKS = 10     # ignore non-QB "passer" rows (trick plays, etc.)
+QB_REPLACEMENT_PCTL = 0.15  # backups / debuts get a replacement-level value
+
+
+def _qb_pregame_value(sched: pl.DataFrame) -> pl.DataFrame:
+    pbp = pl.read_delta(str(SILVER_DIR / "pbp"))
+    qg = (
+        pbp.filter((pl.col("pass") == 1) & pl.col("passer_player_id").is_not_null())
+        .group_by("passer_player_id", "game_id")
+        .agg(pl.col("epa").mean().alias("qb_epa"), pl.len().alias("dropbacks"))
+        .filter(pl.col("dropbacks") >= QB_MIN_DROPBACKS)
+    )
+    dates = sched.select("game_id", "gameday").with_columns(
+        pl.col("gameday").str.to_date().alias("game_date"))
+    qg = (qg.join(dates, on="game_id", how="inner")
+            .sort("passer_player_id", "game_date", "game_id")
+            .with_columns(
+                pl.col("qb_epa").ewm_mean(span=QB_EMA_SPAN, adjust=False, min_samples=1)
+                  .shift(1).over("passer_player_id").alias("qb_value")))
+    return qg.select("game_id", "passer_player_id", "qb_value")
+
+
+# ---------------------------------------------------------------------------
 # 5. Assemble gold_game_features.
 # ---------------------------------------------------------------------------
 def build_gold() -> pl.DataFrame:
@@ -215,6 +259,7 @@ def build_gold() -> pl.DataFrame:
         "spread_line", "total_line", "home_moneyline", "away_moneyline",
         "div_game", "is_dome", "is_neutral_site", "home_field_advantage",
         "temp", "wind", "is_played", "result", "total",
+        "home_qb_id", "away_qb_id",
     )
 
     inj = _injury_team_week()
@@ -240,6 +285,18 @@ def build_gold() -> pl.DataFrame:
         pl.col("away_qb_out").fill_null(0),
     )
 
+    # Continuous QB value of each starter (replacement level for debuts/backups).
+    qb = _qb_pregame_value(sched)
+    repl = float(qb["qb_value"].quantile(QB_REPLACEMENT_PCTL) or 0.0)
+    g = (
+        g.join(qb.rename({"passer_player_id": "home_qb_id", "qb_value": "home_qb_value"}),
+               on=["game_id", "home_qb_id"], how="left")
+         .join(qb.rename({"passer_player_id": "away_qb_id", "qb_value": "away_qb_value"}),
+               on=["game_id", "away_qb_id"], how="left")
+         .with_columns(pl.col("home_qb_value").fill_null(repl),
+                       pl.col("away_qb_value").fill_null(repl))
+    )
+
     # Home-minus-away deltas (what the model actually keys on).
     delta_exprs = [
         (pl.col(f"home_{c}") - pl.col(f"away_{c}")).alias(f"{c}_diff")
@@ -249,7 +306,8 @@ def build_gold() -> pl.DataFrame:
         delta_exprs
         + [(pl.col("away_travel_miles") - pl.col("home_travel_miles")).alias("travel_diff"),
            (pl.col("home_injury_index") - pl.col("away_injury_index")).alias("injury_index_diff"),
-           (pl.col("home_qb_out") - pl.col("away_qb_out")).alias("qb_out_diff")]
+           (pl.col("home_qb_out") - pl.col("away_qb_out")).alias("qb_out_diff"),
+           (pl.col("home_qb_value") - pl.col("away_qb_value")).alias("qb_value_diff")]
     )
 
     # Targets (null on unplayed games -> inference set). Pushes/ties -> null.
