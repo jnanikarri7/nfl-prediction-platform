@@ -65,7 +65,12 @@ runs on the cluster). Build & test free locally; prove cloud parity on Databrick
   number would be a red flag.
 - **Margin within ~0.5 pts of Vegas's own line.** Respectable for engineered public features.
 
-*(Full discussion: [`docs/phase5_mlops.md`](docs/phase5_mlops.md).)*
+**Market-anchored upgrade** (Phase 5.5, [`docs/research.md`](docs/research.md)): re-framing the model
+to predict the *residual vs. the Vegas line* and derive win/cover probs from a Normal(μ,σ) lifts win
+**AUC 0.669 → 0.714** and **Brier 0.23 → 0.214** — essentially matching the market (0.726 / 0.211),
+which research confirms is the realistic ceiling.
+
+*(Full discussion: [`docs/phase5_mlops.md`](docs/phase5_mlops.md) · [`docs/research.md`](docs/research.md).)*
 
 ---
 
@@ -119,6 +124,7 @@ python scripts/run_bronze.py        # ingest 2015-present  (~250 MB, a few min)
 python scripts/run_silver.py        # clean + DQ gate + Z-ORDER
 python scripts/run_gold.py          # leakage-safe features
 python scripts/run_train.py         # LightGBM + XGBoost + MLflow
+python scripts/run_market_model.py  # market-anchored distributional model (matches Vegas)
 python scripts/run_predict.py       # load champion from registry, predict upcoming games
 mlflow ui --backend-store-uri sqlite:///mlflow.db        # browse experiments
 ```
