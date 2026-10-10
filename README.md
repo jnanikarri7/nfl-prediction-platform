@@ -4,7 +4,7 @@
 Azure Databricks, ADLS Gen2, Delta Lake, MLflow, and gradient-boosted models — engineered to
 run for **under $5/month** (Azure for Students) and, remarkably, **$0 end-to-end on a laptop.**
 
-![CI](https://github.com/jnanikarri7/amazon-product-intelligelence/actions/workflows/ci.yml/badge.svg?branch=feature/nfl-prediction-platform)
+![CI](https://github.com/jnanikarri7/nfl-prediction-platform/actions/workflows/ci.yml/badge.svg?branch=main)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Delta Lake](https://img.shields.io/badge/Delta%20Lake-ACID-00ADD8)
 ![MLflow](https://img.shields.io/badge/MLflow-tracked%20%2B%20registered-0194E2)
