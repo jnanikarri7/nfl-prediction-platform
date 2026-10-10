@@ -125,6 +125,7 @@ python scripts/run_silver.py        # clean + DQ gate + Z-ORDER
 python scripts/run_gold.py          # leakage-safe features
 python scripts/run_train.py         # LightGBM + XGBoost + MLflow
 python scripts/run_market_model.py  # market-anchored distributional model (matches Vegas)
+python scripts/run_evaluate.py      # honest betting backtest (ROI + ATS vs break-even)
 python scripts/run_predict.py       # load champion from registry, predict upcoming games
 mlflow ui --backend-store-uri sqlite:///mlflow.db        # browse experiments
 ```

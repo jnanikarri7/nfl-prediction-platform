@@ -73,6 +73,19 @@ Both carry strong univariate signal (corr with home win: `qb_value_diff` 0.235, 
 market-anchored one, because the line already prices QB quality and schedule in. The market-anchored
 model is now within ~0.01 AUC / ~0.002 Brier of Vegas — effectively at the ceiling.
 
+## Phase 5.6 — honest betting backtest (`src/nfl/evaluate.py`)
+Accuracy ≠ profit, so we back-tested the market-anchored model *as if betting* (test seasons 2020+):
+
+| Strategy | Bets | Win/Hit | ROI | vs. break-even |
+|---|---|---|---|---|
+| Moneyline (model edge > 3%) | 875 | 41.0% | **−2.2%** | losing |
+| Against the spread (−110) | 1,715 | 50.1% | **−4.4%** | below 52.38% |
+
+**Verdict: no sustainable edge vs. the market — the correct, expected result.** The perceived "edges"
+were mostly noise; betting them loses to the vig. This is the honest capstone: a public-data model
+can *match* the market's probabilities but cannot reliably beat the closing line. Reporting it (rather
+than cherry-picking a lucky season) is the point.
+
 ## Realistic ceiling (the portfolio win condition)
 Match the market (~0.72 AUC, ~0.19 Brier) and be **well-calibrated**, with an honest CLV writeup —
 not "beat Vegas." NFL outcomes are dominated by game-to-game randomness and the market aggregates
