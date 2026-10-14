@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFL Prediction Platform — Learning Guide</title>
+<style>
+  :root{--bg:#0f1420;--panel:#161c2b;--ink:#e8edf6;--muted:#9fb0c8;--acc:#4da3ff;--acc2:#36d399;--warn:#f6c177;--code:#0b0f17;--line:#263146;}
+  *{box-sizing:border-box}
+  body{margin:0;font:16px/1.65 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+  .wrap{display:flex;max-width:1200px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;width:270px;height:100vh;overflow:auto;padding:24px 16px;border-right:1px solid var(--line);background:var(--panel)}
+  nav h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
+  nav a{display:block;padding:4px 8px;border-radius:6px;color:var(--ink);font-size:14px}
+  nav a:hover{background:#1e2740;text-decoration:none}
+  main{flex:1;min-width:0;padding:36px 44px 120px}
+  h1{font-size:30px;margin:.2em 0 .1em;line-height:1.2}
+  .sub{color:var(--muted);margin:0 0 24px}
+  section{border-top:1px solid var(--line);padding:28px 0 4px;scroll-margin-top:16px}
+  h2.sec{font-size:23px;color:var(--acc)} h3{font-size:18px;margin-top:22px}
+  .tag{display:inline-block;font-size:12px;color:#0b0f17;background:var(--acc2);border-radius:999px;padding:2px 10px;font-weight:700;vertical-align:middle;margin-left:8px}
+  code{background:#1b2335;color:#cfe3ff;padding:1px 6px;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:16px;overflow:auto;font-size:13.5px;line-height:1.5}
+  pre code{background:none;color:#d6e2f5;padding:0}
+  .why,.alt,.next,.concept{border-left:4px solid;border-radius:0 8px 8px 0;padding:12px 16px;margin:14px 0;background:#141b2a}
+  .why{border-color:var(--acc2)} .alt{border-color:var(--warn)} .next{border-color:var(--acc)} .concept{border-color:#b48ead;background:#1a1526}
+  .lbl{font-weight:700;letter-spacing:.03em;font-size:12px;text-transform:uppercase;display:block;margin-bottom:4px}
+  .why .lbl{color:var(--acc2)} .alt .lbl{color:var(--warn)} .next .lbl{color:var(--acc)} .concept .lbl{color:#d3a9d6}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left} th{background:#1b2335;color:var(--muted)}
+  .kpi{display:inline-block;background:#13261d;border:1px solid #2b5a44;color:var(--acc2);border-radius:8px;padding:3px 10px;font-weight:700;margin:2px}
+  @media print{nav{display:none} .wrap{max-width:none} main{padding:0} body{background:#fff;color:#111} pre{background:#f5f7fb;color:#111} section{border-color:#ccc}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <h2>Contents</h2>
+  <a href="#intro">0 · Overview &amp; big idea</a>
+  <a href="#concepts">1 · Concept primer</a>
+  <a href="#infra">2 · Infrastructure &amp; cost</a>
+  <a href="#dual">3 · Dual-engine design</a>
+  <a href="#bronze">4 · Bronze (raw)</a>
+  <a href="#silver">5 · Silver (clean + DQ)</a>
+  <a href="#gold">6 · Gold (features + leakage)</a>
+  <a href="#mlops">7 · MLOps &amp; walk-forward</a>
+  <a href="#market">8 · Market-anchored model</a>
+  <a href="#betting">9 · Betting evaluation</a>
+  <a href="#cicd">10 · CI/CD &amp; tests</a>
+  <a href="#postmortem">11 · Post-mortem lessons</a>
+  <a href="#roadmap">12 · Roadmap</a>
+  <a href="#run">13 · How to run</a>
+</nav>
+<main>
+
+<h1>🏈 NFL Prediction Platform — Learning Guide</h1>
+<p class="sub">A section-by-section walkthrough of the concepts and code. Read top-to-bottom to learn,
+or jump via the contents. Each part explains <b>what</b>, <b>why</b>, <b>alternatives</b>, and <b>next steps</b>.</p>
+
+<section id="intro">
+<h2 class="sec">0 · Overview &amp; the big idea</h2>
+<p>We predict NFL game outcomes (who wins, by how much, and vs. the Vegas spread) using a modern
+<b>lakehouse</b> + <b>MLOps</b> stack. The whole pipeline runs <b>$0 locally</b> and is ready to run
+on Azure Databricks for <b>&lt;$5/month</b>.</p>
+<div class="concept"><span class="lbl">Core thesis</span>NFL data is <b>wide but small</b> (~550k plays, ~250&nbsp;MB).
+The hard problems are <b>temporal correctness</b> (never letting the future leak into the past) and
+<b>honest evaluation against the betting market</b> — not big-data scale. The win condition is
+<b>matching the market and being well-calibrated</b>, not "beating Vegas" (which public models can't reliably do).</p>
+<p><b>Data flow (Medallion architecture):</b></p>
+<pre><code>nflreadpy ─▶ 🥉 Bronze (raw+lineage) ─▶ 🥈 Silver (clean+validated) ─▶ 🥇 Gold (features) ─▶ 🤖 MLflow (models)
+                                                                                           └▶ 🎰 vs Vegas baseline</code></pre>
+</section>
+
+<section id="concepts">
+<h2 class="sec">1 · Concept primer <span class="tag">learn these first</span></h2>
+<table>
+<tr><th>Concept</th><th>Plain-English meaning</th></tr>
+<tr><td><b>Lakehouse</b></td><td>Cheap cloud object storage (files) + a table layer that gives database-like guarantees on top.</td></tr>
+<tr><td><b>Delta Lake</b></td><td>The table format we use. Adds <b>ACID transactions</b>, versioning/time-travel, and schema enforcement to Parquet files.</td></tr>
+<tr><td><b>Medallion (Bronze/Silver/Gold)</b></td><td>A 3-tier refinement pattern: raw → cleaned → feature-ready. Each layer has a clear contract.</td></tr>
+<tr><td><b>EPA</b> (Expected Points Added)</td><td>How much a single play changed the team's expected points. The core "goodness" signal in modern NFL analytics.</td></tr>
+<tr><td><b>CPOE</b></td><td>Completion % Over Expected — passing accuracy adjusted for difficulty.</td></tr>
+<tr><td><b>Elo rating</b></td><td>A single number for team strength, updated after each game by how surprising the result was.</td></tr>
+<tr><td><b>Data leakage</b></td><td>Accidentally using information not available before kickoff. Inflates test scores; collapses in production. <b>The #1 enemy.</b></td></tr>
+<tr><td><b>Walk-forward CV</b></td><td>Validation that respects time: train on past seasons, test on the next. (Never random k-fold.)</td></tr>
+<tr><td><b>Calibration</b></td><td>When you say "70%," it happens 70% of the time. Measured by <b>Brier</b> / log-loss, not accuracy.</td></tr>
+<tr><td><b>Market anchoring</b></td><td>Start from the Vegas line (which already encodes huge information) and only deviate where you have real signal.</td></tr>
+</table>
+</section>
+
+<section id="infra">
+<h2 class="sec">2 · Infrastructure &amp; cost (Phase 1)</h2>
+<p><b>What:</b> Terraform provisions ADLS Gen2 storage (3 containers: bronze/silver/gold), a least-privilege
+service principal, and a <b>single-node</b> Databricks cluster that auto-terminates after 20 min. Databricks
+connects to storage via direct <code>abfss://</code> + OAuth, with secrets in a secret scope (no mounts).</p>
+<pre><code>resource "azurerm_storage_account" "lake" {
+  account_tier             = "Standard"
+  account_replication_type = "LRS"      # cheapest
+  is_hns_enabled           = true       # &lt;-- this makes it ADLS Gen2 (real directories)
+}</code></pre>
+<div class="why"><span class="lbl">Why</span>Single-node = no worker-VM cost (the biggest lever). Auto-terminate stops idle burn.
+A service principal is scoped + rotatable (unlike account keys). Direct ABFSS is the modern pattern; mounts are legacy.</div>
+<div class="alt"><span class="lbl">Alternatives</span>Plain Blob (no real directories → worse Delta); multi-node cluster (overkill at 250&nbsp;MB);
+account keys (god-mode); Portal click-ops (not reproducible → chose Terraform).</div>
+<div class="next"><span class="lbl">Next steps</span>OIDC auth instead of a token in CI; a $5 budget alert; Unity Catalog if it grows.</div>
+</section>
+
+<section id="dual">
+<h2 class="sec">3 · Dual-engine, local-first design</h2>
+<p><b>What:</b> every transform exists twice — a local <code>polars</code> + <code>deltalake</code> module in
+<code>src/nfl/</code> and a PySpark notebook in <code>databricks/notebooks/</code> — from one logic spec.</p>
+<div class="why"><span class="lbl">Why</span>The dev machine has no Java (PySpark-on-Windows is painful). Polars/delta-rs runs the
+<b>entire pipeline for $0</b> with no Java, and writes <b>real Delta tables</b> that Databricks can read. You build and test
+free locally, and only pay to prove cloud parity.</div>
+<div class="alt"><span class="lbl">Alternatives</span>PySpark-only (needs JDK + winutils; can't dev cheaply); Spark-in-Docker (heavy); DuckDB (fine, but polars matches the pandas/Spark model better).</div>
+<div class="next"><span class="lbl">Next steps</span>The Databricks notebooks are currently <b>behind</b> the local modules (missing the newest features) — re-sync them so parity is exact.</div>
+</section>
+
+<section id="bronze">
+<h2 class="sec">4 · Bronze — raw ingestion (Phase 2)</h2>
+<p><b>What:</b> pull 2015–present from <code>nflreadpy</code>, add <b>lineage columns</b>, and append to Delta — <b>no cleaning</b>.</p>
+<pre><code>sdf = (spark.createDataFrame(pldf.to_pandas())
+       .withColumn("_ingest_ts",   F.current_timestamp())
+       .withColumn("_source_file", F.lit(source_file))
+       .withColumn("_batch_id",    F.lit(batch_id)))
+writer.mode("append").save(path)      # Bronze is an immutable, append-only log</code></pre>
+<div class="concept"><span class="lbl">Concept: the Bronze contract</span>Bronze stores data <b>exactly as delivered</b> so history is always
+replayable and auditable. All business logic is deferred to Silver. Lineage columns make every row traceable to its ingestion run.</div>
+<div class="why"><span class="lbl">Why</span>Separating "capture" from "clean" means a bug in cleaning never costs you the raw data — you just re-run Silver.</div>
+<div class="alt"><span class="lbl">Alternatives</span>Write straight to a cleaned table (loses the audit trail); CSV/Parquet without Delta (no ACID/time-travel).</div>
+</section>
+
+<section id="silver">
+<h2 class="sec">5 · Silver — clean, validate, conform (Phase 3)</h2>
+<p><b>What:</b> dedupe; drop special-teams/garbage-time/null-possession plays; impute dome weather; <b>conform team
+identity</b> across relocations (SD→LAC, STL→LAR, OAK→LV); run a <b>data-quality gate</b> that hard-fails before writing;
+Z-ORDER for fast reads.</p>
+<pre><code># keep only real offensive plays; drop garbage time; one predicate does a lot
+.filter(((pl.col("pass")==1)|(pl.col("rush")==1)) &amp; (pl.col("special").fill_null(0)==0))
+.filter(pl.col("epa").is_not_null())</code></pre>
+<div class="concept"><span class="lbl">Concept: data-quality gate</span>A lightweight "Great Expectations"-style suite — <code>unique</code>,
+<code>not_null</code>, <code>in_range</code> — that <b>raises an error before a bad write</b>. It literally caught a real bug: a
+franchise-relocation mismatch was creating duplicate game rows (the <code>unique(game_id)</code> check failed).</div>
+<div class="why"><span class="lbl">Why</span>Team conforming is essential — otherwise home/away joins break and Elo treats a relocated team as two franchises.</div>
+<div class="next"><span class="lbl">Next steps</span>Row-count/freshness drift checks; quarantine bad rows instead of hard-fail for non-critical checks.</div>
+</section>
+
+<section id="gold">
+<h2 class="sec">6 · Gold — leakage-safe features (Phase 4 + Tier 2) <span class="tag">most important</span></h2>
+<p><b>What:</b> one row per game with home-vs-away feature deltas and target labels. Features: rolling EMA of off/def EPA,
+CPOE, turnovers; Elo; rest; travel; injury index + QB-out; <b>continuous QB value</b>; <b>opponent-adjusted EPA</b>.</p>
+<div class="concept"><span class="lbl">Concept: data leakage &amp; the <code>shift(1)</code> trick</span>A feature on a game's row may use
+<b>only</b> info available before kickoff. We compute a rolling average of a team's form, then shift it forward one game so a
+row never sees its own result:</div>
+<pre><code>pl.col("off_epa").ewm_mean(span=8).shift(1).over("team")   # EMA of PRIOR games only
+# Self-test: 2015 Week-1 rows have NULL features (no prior games exist) ✔</code></pre>
+<p><b>Elo</b> is recorded <b>before</b> updating (pre-game snapshot), iterating in date order:</p>
+<pre><code>eh, ea = ratings[home], ratings[away]           # snapshot BEFORE the game
+rows.append((game_id, eh, ea))                  # &lt;- this is the leakage-safe feature
+if played:                                      # update only AFTER recording
+    exp = 1/(1+10**((ea-eh-HFA)/400)); ratings[home] += K*(actual-exp)</code></pre>
+<div class="concept"><span class="lbl">Concept: opponent-adjusted EPA</span>Raw EPA is confounded by schedule (great stats vs. weak defenses
+mean less). We subtract the opponent's <i>pre-game</i> strength from each game's EPA, then roll — so ratings are net of who you played.</div>
+<div class="concept"><span class="lbl">Concept: continuous QB value</span>A QB-out flag is crude. We give each starting QB a rolling
+passing-EPA value (replacement level for backups) and feed the home-minus-away difference — the single biggest swing in team strength.</div>
+<div class="alt"><span class="lbl">Alternatives</span>Full ridge/mixed-effects opponent adjustment (heavier; research shows only ~0.5% gain) →
+chose the one-pass version; QB Elo (richer but complex) → chose rolling passing-EPA proxy.</div>
+<div class="next"><span class="lbl">Next steps — known limitation</span>Rolling features are keyed to a game's own play-by-play, so
+<b>future games have null features</b> (live picks use only spread+Elo+injuries). <b>Fix:</b> carry each team's most-recent
+form forward to its next scheduled game. Also: success rate, early-down EPA, pass-rate-over-expected, pace.</div>
+</section>
+
+<section id="mlops">
+<h2 class="sec">7 · MLOps — training &amp; walk-forward CV (Phase 5)</h2>
+<p><b>What:</b> LightGBM + XGBoost on three targets (win, cover, margin); every run logged to <b>MLflow</b> (params, metrics,
+feature-importance plots, model artifacts); best model aliased <code>champion</code>; <b>Vegas logged as a baseline</b>.</p>
+<div class="concept"><span class="lbl">Concept: walk-forward validation</span>Time-series data must be split by time. We train on seasons
+<code>[N-4, N-1]</code> and test on season <code>N</code>, rolling forward. Random k-fold would train on 2024 to predict 2019 —
+training on the future — and inflate scores.</div>
+<pre><code>for test_season in range(FIRST, LAST+1):
+    train = df.filter(season.is_between(test_season-4, test_season-1))
+    test  = df.filter(season == test_season)        # always strictly future</code></pre>
+<div class="why"><span class="lbl">Why GBDTs, not deep learning</span>Wide/small tabular data → gradient-boosted trees win: fast, no GPU,
+handle missing values natively, and give free feature-importances. A neural net would cost more and lose.</div>
+<p><b>Result:</b> win <span class="kpi">AUC 0.669</span> — which was <b>worse than the Vegas line</b> (0.724) the model already ingests. That diagnosis drove the next step.</p>
+</section>
+
+<section id="market">
+<h2 class="sec">8 · Market-anchored distributional model (Phase 5.5) <span class="tag">the big lever</span></h2>
+<div class="concept"><span class="lbl">The key insight</span>The plain model was <b>diluting</b> an already-efficient market signal.
+A trivial baseline — the spread run through a bell curve — scores ~0.72 AUC with <b>zero</b> machine learning. So the fix wasn't more
+features; it was to <b>anchor to the market</b> and only deviate on real signal.</div>
+<p><b>What:</b> predict the <b>residual</b> (<code>actual_margin − spread_line</code>), assume margin ~ Normal(μ, σ≈12.8), and derive
+<b>both</b> win and cover probabilities analytically:</p>
+<pre><code>mu = spread_line + SHRINK * model.predict(X)      # anchor to line + shrunk deviation
+win_prob   = Φ(mu / sigma)                        # Φ = normal CDF
+cover_prob = Φ((mu - spread_line) / sigma)</code></pre>
+<table>
+<tr><th>Model</th><th>Win AUC</th><th>Brier (lower=better)</th></tr>
+<tr><td>Baseline GBM</td><td>0.669</td><td>0.230</td></tr>
+<tr><td><b>Market-anchored</b></td><td><b>0.714 → 0.717</b> (+Tier2)</td><td><b>0.213</b></td></tr>
+<tr><td>Vegas ceiling</td><td>0.726</td><td>0.211</td></tr>
+</table>
+<div class="concept"><span class="lbl">Concept: calibration</span>For betting, <b>calibration</b> (a 70% pick wins 70% of the time) matters more
+than ranking (AUC). We measure <b>Brier</b> and log-loss and fit <b>isotonic regression</b> on a held-out season.</div>
+<div class="next"><span class="lbl">Honest findings &amp; next steps</span>Still does <b>not beat</b> the pure spread baseline (the ceiling). Isotonic
+calibration on one small season slightly <b>hurt</b> — next: pool more seasons / Platt scaling; learn σ (heteroscedastic); confidence-weighted SHRINK.</div>
+</section>
+
+<section id="betting">
+<h2 class="sec">9 · Honest betting evaluation (Phase 5.6)</h2>
+<div class="concept"><span class="lbl">Concept: accuracy ≠ profit</span>A model can be accurate and still lose money to the "vig"
+(the house's cut). The real test is a <b>betting backtest</b>: simulate wagering and measure ROI.</div>
+<table>
+<tr><th>Strategy</th><th>Bets</th><th>Win/Hit</th><th>ROI</th><th>Verdict</th></tr>
+<tr><td>Moneyline (edge &gt; 3%)</td><td>875</td><td>41.0%</td><td>−2.2%</td><td>losing</td></tr>
+<tr><td>Against the spread (−110)</td><td>1,715</td><td>50.1%</td><td>−4.4%</td><td>below 52.38% break-even</td></tr>
+</table>
+<div class="why"><span class="lbl">Why this is the right result</span>No public-data model reliably beats the closing line. Reporting
+"no edge" honestly — rather than cherry-picking a lucky season — is the mark of sound judgment.</div>
+</section>
+
+<section id="cicd">
+<h2 class="sec">10 · CI/CD &amp; tests (Phase 6)</h2>
+<p><b>What:</b> GitHub Actions runs <code>ruff</code> (lint) + <code>pytest</code> on every push; a gated job deploys a Databricks
+Asset Bundle on the main branch. Tests target the <b>correctness invariants</b>.</p>
+<pre><code>def test_ema_shift_is_leakage_free():
+    out = s.with_columns(pl.col("x").ewm_mean(span=4).shift(1).over("team").alias("ema"))
+    assert out["ema"][0] is None     # first game has no prior -> must be null</code></pre>
+<div class="why"><span class="lbl">Why these tests</span>They lock down the things that silently corrupt results if broken: a leaky window,
+a mis-mapped relocated team, bad odds math. Fast, deterministic, no data download.</div>
+</section>
+
+<section id="postmortem">
+<h2 class="sec">11 · Post-mortem lessons (real Week 5)</h2>
+<p>Model went <b>9/15 (60%)</b>. Diagnosis:</p>
+<ul>
+<li>🎲 <b>High-variance upset week</b> — the Vegas favorite lost 5/15 (33% vs. ~25% baseline). Vegas also "lost many."</li>
+<li><b>4 of 6 misses were genuine upsets</b> no model catches (TB beat a 9.5-pt favorite — a ~2.5σ event).</li>
+<li>🎯 <b>Catchable pattern:</b> in 2 misses our own Elo favored the winner, but market-anchoring overrode it → idea: deviate more when power ratings strongly disagree with the line.</li>
+<li>📏 <b>One week (15 games) can't judge a model</b> — 60% in a 33%-upset week is statistically normal.</li>
+</ul>
+</section>
+
+<section id="roadmap">
+<h2 class="sec">12 · Prioritized roadmap</h2>
+<table>
+<tr><th>#</th><th>Improvement</th><th>Priority</th></tr>
+<tr><td>1</td><td>Forward-feature carry-forward (live picks use full features) — correctness</td><td>High</td></tr>
+<tr><td>2</td><td>Re-sync Databricks notebooks with newest features (exact parity)</td><td>High</td></tr>
+<tr><td>3</td><td>Calibration fix (pool seasons / Platt) + learned σ</td><td>Medium</td></tr>
+<tr><td>4</td><td>Confidence-weighted deviation from the line</td><td>Medium</td></tr>
+<tr><td>5</td><td>Feature depth (success rate, early-down EPA, PROE, pace)</td><td>Medium</td></tr>
+<tr><td>6</td><td>Expanding-window + nested CV + Optuna</td><td>Medium</td></tr>
+<tr><td>7</td><td>Live Azure deploy (Terraform + bundle run)</td><td>When spending</td></tr>
+</table>
+</section>
+
+<section id="run">
+<h2 class="sec">13 · How to run (local, $0)</h2>
+<pre><code>python -m venv .venv &amp;&amp; .venv\Scripts\activate
+pip install -r requirements.txt
+python scripts/run_bronze.py        # ingest 2015-present  (~250 MB)
+python scripts/run_silver.py        # clean + DQ gate + Z-ORDER
+python scripts/run_gold.py          # leakage-safe features
+python scripts/run_train.py         # LightGBM + XGBoost + MLflow
+python scripts/run_market_model.py  # market-anchored distributional model
+python scripts/run_evaluate.py      # betting backtest (ROI + ATS)
+python scripts/run_predict.py       # predict upcoming games
+mlflow ui --backend-store-uri sqlite:///mlflow.db   # browse experiments</code></pre>
+<p class="sub" style="margin-top:28px">Generated for the NFL Prediction Platform. To make a PDF: open in a browser and
+Print → Save as PDF. To edit in Word: File → Open → this .html file.</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>
