@@ -143,6 +143,12 @@ Set a **$5 budget alert** and keep the 20-min auto-terminate. Details:
 
 ---
 
+## 📖 Documentation
+- **[`docs/DESIGN.md`](docs/DESIGN.md)** — full design & decision record: every step, why, alternatives, next steps
+- **[`docs/research.md`](docs/research.md)** — how to improve the model + the honest ceiling (web research + sources)
+- **[`docs/week5_postmortem.md`](docs/week5_postmortem.md)** — data-driven analysis of a real week's misses
+- Per-phase deep dives: [`phase1`](docs/phase1_architecture.md) · [`phase2`](docs/phase2_bronze.md) · [`phase3`](docs/phase3_silver.md) · [`phase4`](docs/phase4_gold.md) · [`phase5`](docs/phase5_mlops.md) · [`phase6`](docs/phase6_cicd.md)
+
 ## 📚 Build phases
 - [x] [Phase 1 — Cost-optimized architecture & IaC](docs/phase1_architecture.md)
 - [x] [Phase 2 — Bronze ingestion](docs/phase2_bronze.md)
