@@ -1,47 +1,39 @@
-"""Gold layer — leakage-safe feature engineering.
+"""Gold: one row per scheduled game, home-minus-away feature deltas, targets on played games.
 
-The cardinal rule: every feature on a game's row uses ONLY information available
-BEFORE kickoff. We enforce this two ways:
-  1. Rolling EMAs are shift(1)'d within each team's timeline, so a game never
-     sees its own result (or any later game).
-  2. Elo ratings are recorded PRE-update and the update happens only after a game
-     is scored, iterating strictly in chronological order.
-
-Betting lines (spread/total) are legitimate pre-kickoff features and are kept;
-final scores/results are targets only and never enter the feature set.
-
-Output: gold_game_features — one row per scheduled game, home-vs-away deltas,
-with target labels on played games (null on future games, ready for inference).
+Every feature must be knowable before kickoff. Two places this can go wrong:
+  - rolling stats: every EMA is shift(1)'d within the team's timeline, so a game never
+    sees its own result;
+  - Elo: the rating is snapshotted *before* the post-game update, iterating in date order.
+Closing lines are fair game (published pre-kickoff); scores are targets only.
+Unplayed games keep null targets so the same table feeds inference.
 """
 from __future__ import annotations
 
 import math
 
 import polars as pl
-from deltalake import DeltaTable, write_deltalake
 
 from . import quality as dq
 from .config import GOLD_DIR, SILVER_DIR
+from .lake import write_table
 from .stadiums import TEAM_COORDS
 
 EMA_SPANS = (4, 8)
-# Injury model: a team-week injury index weights each listed player by position
-# importance x game-status severity. The weekly report is published pre-kickoff,
-# so joining a week's report to that week's game is NOT leakage.
+# Injury index = sum(position weight x status weight) per team-week. Weights are
+# hand-tuned priors, not fitted. The final injury report comes out before kickoff,
+# so same-week joins are safe.
 POS_WEIGHT = {"QB": 4.0, "WR": 1.5, "RB": 1.2, "TE": 1.0, "T": 1.3, "LT": 1.3,
               "RT": 1.3, "G": 1.1, "C": 1.1, "OL": 1.2, "EDGE": 1.3, "DE": 1.2,
               "DT": 1.1, "CB": 1.3, "S": 1.1, "FS": 1.1, "SS": 1.1, "LB": 1.0}
 STATUS_WEIGHT = {"Out": 1.0, "Doubtful": 0.75, "Questionable": 0.35}
+# Conventional NFL Elo constants. Not tuned against this data -- a cheap thing to sweep.
 ELO_K = 20.0
-ELO_HFA = 55.0          # home-field advantage in Elo points
+ELO_HFA = 55.0
 ELO_BASE = 1500.0
-ELO_REGRESS = 0.75      # offseason regression toward the mean
-MAX_REST_DAYS = 14      # cap offseason gap so week-1 "rest" isn't ~200 days
+ELO_REGRESS = 0.75
+MAX_REST_DAYS = 14      # otherwise week 1 "rest" is ~200 days and dominates the feature
 
 
-# ---------------------------------------------------------------------------
-# 1. Per-team, per-game box score (offense + defense) from play-by-play.
-# ---------------------------------------------------------------------------
 def _team_game_stats(pbp: pl.DataFrame) -> pl.DataFrame:
     off = pbp.group_by("game_id", "posteam").agg(
         pl.len().alias("off_plays"),
@@ -62,9 +54,6 @@ def _team_game_stats(pbp: pl.DataFrame) -> pl.DataFrame:
     return off.join(deff, on=["game_id", "team"], how="inner")
 
 
-# ---------------------------------------------------------------------------
-# 2. Team timeline with leakage-safe rolling EMAs + rest days.
-# ---------------------------------------------------------------------------
 EMA_BASE_COLS = ["off_epa", "def_epa", "off_pass_epa", "off_rush_epa",
                  "def_pass_epa", "def_rush_epa", "off_cpoe",
                  "giveaways", "takeaways"]
@@ -84,13 +73,12 @@ def _team_timeline(team_game: pl.DataFrame, sched: pl.DataFrame) -> pl.DataFrame
         .sort("team", "game_date", "game_id")
     )
 
-    # Rolling EMAs over PRIOR games only (ewm then shift(1) within team).
+    # shift(1) AFTER ewm: the EMA at row i includes game i, so shift it onto game i+1.
     ema_exprs = [
         pl.col(col).ewm_mean(span=span, adjust=False, min_samples=1)
           .shift(1).over("team").alias(f"{col}_ema{span}")
         for span in EMA_SPANS for col in EMA_BASE_COLS
     ]
-    # Days of rest within a season; new-season week 1 gets the cap.
     rest = (
         pl.when(pl.col("season") == pl.col("season").shift(1).over("team"))
           .then((pl.col("game_date") - pl.col("game_date").shift(1).over("team")).dt.total_days())
@@ -100,9 +88,9 @@ def _team_timeline(team_game: pl.DataFrame, sched: pl.DataFrame) -> pl.DataFrame
     )
     tg = tg.with_columns(ema_exprs + [rest])
 
-    # Opponent-adjusted EPA: subtract the opponent's PRE-GAME strength (EMA-8) from
-    # this game's raw EPA, then roll. Fixes schedule confounding (the "flat features"
-    # the importance analysis exposed). Opponent EMAs are pre-game -> leakage-safe.
+    # Opponent adjustment: raw EPA minus the opponent's pre-game EMA-8, then rolled.
+    # Without this, a team that just played three bad defenses looks elite. Opponent
+    # EMAs are already shifted, so this stays leakage-safe.
     opp = (tg.select("game_id", "team", "off_epa_ema8", "def_epa_ema8")
              .rename({"team": "opponent", "off_epa_ema8": "opp_off_str",
                       "def_epa_ema8": "opp_def_str"}))
@@ -124,9 +112,6 @@ def _team_timeline(team_game: pl.DataFrame, sched: pl.DataFrame) -> pl.DataFrame
     )
 
 
-# ---------------------------------------------------------------------------
-# 3. Elo ratings — chronological, recorded pre-update (leakage-safe).
-# ---------------------------------------------------------------------------
 def _compute_elo(sched: pl.DataFrame) -> pl.DataFrame:
     games = sched.sort("gameday", "game_id").select(
         "game_id", "season", "home_team", "away_team",
@@ -139,7 +124,7 @@ def _compute_elo(sched: pl.DataFrame) -> pl.DataFrame:
     for r in games.iter_rows(named=True):
         if cur_season is None:
             cur_season = r["season"]
-        if r["season"] != cur_season:  # offseason regression toward mean
+        if r["season"] != cur_season:
             for t in ratings:
                 ratings[t] = ELO_REGRESS * ratings[t] + (1 - ELO_REGRESS) * ELO_BASE
             cur_season = r["season"]
@@ -162,11 +147,8 @@ def _compute_elo(sched: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# 4. Travel distance (haversine) for the away team.
-# ---------------------------------------------------------------------------
 def _haversine(lat1, lon1, lat2, lon2) -> float:
-    r = 3958.8  # miles
+    r = 3958.8  # earth radius, miles
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlmb = math.radians(lon2 - lon1)
@@ -175,6 +157,8 @@ def _haversine(lat1, lon1, lat2, lon2) -> float:
 
 
 def _travel(sched: pl.DataFrame) -> pl.DataFrame:
+    # Home team is assumed not to travel, and away miles are stadium-to-stadium. Both are
+    # wrong for international games; home_field_advantage=0 is the only signal there.
     def miles(home: str, away: str) -> float | None:
         h, a = TEAM_COORDS.get(home), TEAM_COORDS.get(away)
         return _haversine(a[0], a[1], h[0], h[1]) if h and a else None
@@ -187,12 +171,9 @@ def _travel(sched: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# 4b. Injury index per team-week (pre-game report; not leakage).
-# ---------------------------------------------------------------------------
 def _injury_team_week() -> pl.DataFrame:
     inj = pl.read_delta(str(SILVER_DIR / "injuries"))
-    # Align join-key dtypes with schedules (season/week are i32 there).
+    # Schedules store season/week as i32; polars won't join on mismatched key dtypes.
     inj = inj.with_columns(pl.col("season").cast(pl.Int32), pl.col("week").cast(pl.Int32))
     inj = inj.with_columns(
         pl.col("position").fill_null("UNK")
@@ -210,16 +191,13 @@ def _injury_team_week() -> pl.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# 4c. Continuous QB value — rolling passing-EPA/play of the starter (pre-game).
-# ---------------------------------------------------------------------------
-QB_EMA_SPAN = 10          # QB form stabilizes over ~10 games
-QB_MIN_DROPBACKS = 10     # ignore non-QB "passer" rows (trick plays, etc.)
-QB_REPLACEMENT_PCTL = 0.15  # backups / debuts get a replacement-level value
+QB_EMA_SPAN = 10
+QB_MIN_DROPBACKS = 10       # drops RB/WR trick-play "passers"
+QB_REPLACEMENT_PCTL = 0.15  # debuts and backups with no history get this
 
 
-def _qb_pregame_value(sched: pl.DataFrame) -> pl.DataFrame:
-    pbp = pl.read_delta(str(SILVER_DIR / "pbp"))
+def _qb_pregame_value(pbp: pl.DataFrame, sched: pl.DataFrame) -> pl.DataFrame:
+    """Starter's rolling passing EPA/play going into each game."""
     qg = (
         pbp.filter((pl.col("pass") == 1) & pl.col("passer_player_id").is_not_null())
         .group_by("passer_player_id", "game_id")
@@ -236,13 +214,14 @@ def _qb_pregame_value(sched: pl.DataFrame) -> pl.DataFrame:
     return qg.select("game_id", "passer_player_id", "qb_value")
 
 
-# ---------------------------------------------------------------------------
-# 5. Assemble gold_game_features.
-# ---------------------------------------------------------------------------
 def build_gold() -> pl.DataFrame:
     pbp = pl.read_delta(str(SILVER_DIR / "pbp"))
     sched = pl.read_delta(str(SILVER_DIR / "schedules"))
 
+    # TODO: unplayed games have no pbp, so they get no timeline row (all EMA diffs null)
+    # and no QB-value row (both QBs fall back to replacement level). Elo and the lines
+    # are the only live signal at inference time. Fix: carry each team's/QB's latest
+    # post-game EMA forward onto its next scheduled game.
     timeline = _team_timeline(_team_game_stats(pbp), sched)
     elo = _compute_elo(sched)
     travel = _travel(sched)
@@ -277,7 +256,7 @@ def build_gold() -> pl.DataFrame:
         .join(home_inj, on=["season", "week", "home_team"], how="left")
         .join(away_inj, on=["season", "week", "away_team"], how="left")
     )
-    # Teams absent from a week's report have no listed injuries -> 0.
+    # No row in the report means nobody listed, not unknown.
     g = g.with_columns(
         pl.col("home_injury_index").fill_null(0.0),
         pl.col("away_injury_index").fill_null(0.0),
@@ -285,8 +264,7 @@ def build_gold() -> pl.DataFrame:
         pl.col("away_qb_out").fill_null(0),
     )
 
-    # Continuous QB value of each starter (replacement level for debuts/backups).
-    qb = _qb_pregame_value(sched)
+    qb = _qb_pregame_value(pbp, sched)
     repl = float(qb["qb_value"].quantile(QB_REPLACEMENT_PCTL) or 0.0)
     g = (
         g.join(qb.rename({"passer_player_id": "home_qb_id", "qb_value": "home_qb_value"}),
@@ -297,7 +275,6 @@ def build_gold() -> pl.DataFrame:
                        pl.col("away_qb_value").fill_null(repl))
     )
 
-    # Home-minus-away deltas (what the model actually keys on).
     delta_exprs = [
         (pl.col(f"home_{c}") - pl.col(f"away_{c}")).alias(f"{c}_diff")
         for c in feat_cols
@@ -310,7 +287,7 @@ def build_gold() -> pl.DataFrame:
            (pl.col("home_qb_value") - pl.col("away_qb_value")).alias("qb_value_diff")]
     )
 
-    # Targets (null on unplayed games -> inference set). Pushes/ties -> null.
+    # Ties and pushes get null targets rather than a third class.
     g = g.with_columns(
         pl.when(pl.col("is_played") & (pl.col("result") != 0))
           .then((pl.col("result") > 0).cast(pl.Int8)).alias("home_win"),
@@ -336,13 +313,7 @@ def run() -> int:
     report.print_summary()
     report.raise_if_failed()
 
-    path = str(GOLD_DIR / "game_features")
-    write_deltalake(path, g.to_arrow(), mode="overwrite",
-                    partition_by=["season"], schema_mode="overwrite")
-    try:
-        DeltaTable(path).optimize.z_order(["week", "game_id"])
-    except Exception as e:
-        print(f"  (z-order skipped: {type(e).__name__})")
+    write_table(g, str(GOLD_DIR / "game_features"), ["week", "game_id"])
 
     trainable = g.filter(pl.col("home_win").is_not_null()).height
     print(f"  wrote gold/game_features: {g.height:,} games, {g.width} cols")
