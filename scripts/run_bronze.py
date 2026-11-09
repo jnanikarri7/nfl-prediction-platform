@@ -14,20 +14,8 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
-# Windows consoles default to cp1252 and choke on UTF-8 output (emojis, polars
-# table borders). Force UTF-8 so runs don't crash on a print statement.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8")
-    except (AttributeError, ValueError):
-        pass
-
-# Make `src/` importable without installing the package.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
+import _bootstrap  # noqa: F401  (sets sys.path + UTF-8 stdout)
 from nfl import bronze
 from nfl.config import DATASETS, END_SEASON, START_SEASON
 

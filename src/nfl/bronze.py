@@ -1,11 +1,4 @@
-"""Bronze layer — local ingestion with polars + deltalake.
-
-Logic mirror of databricks/notebooks/01_bronze_ingest.py:
-  nflreadpy (polars) -> add lineage -> write real Delta table to data/bronze/<name>
-
-Bronze contract is identical: no cleaning, append-only semantics available, lineage
-columns on every row. The only difference is the engine (polars/delta-rs vs PySpark).
-"""
+"""Bronze: land nflreadpy output as-is in Delta, plus lineage columns. No cleaning here."""
 from __future__ import annotations
 
 import datetime as dt
@@ -20,14 +13,15 @@ from .config import BRONZE_DIR, DATASETS, Dataset, season_range
 LINEAGE_COLS = ("_ingest_ts", "_source_file", "_batch_id", "_source_rows")
 
 
+# TODO: utcnow() is deprecated as of 3.12. Switching to an aware datetime changes the
+# _ingest_ts Delta type, so existing append-mode tables would need a rewrite first.
 def _new_batch_id() -> str:
     return f"{dt.datetime.utcnow():%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:8]}"
 
 
 def _cast_null_columns(df: pl.DataFrame) -> pl.DataFrame:
-    """nflverse all-null columns arrive as polars Null dtype, which Arrow/Delta
-    cannot materialize. Cast to Utf8 — no values change, only an untyped empty
-    column becomes a typed empty one. Same fix as the Spark notebook."""
+    # Columns that are entirely null come through as polars Null dtype, which Delta
+    # can't store. Utf8 is just a placeholder type; no values change.
     null_cols = [c for c, t in df.schema.items() if t == pl.Null]
     if null_cols:
         df = df.with_columns(pl.col(c).cast(pl.Utf8) for c in null_cols)
@@ -76,11 +70,8 @@ def ingest_dataset(ds: Dataset, seasons: list[int], batch_id: str, mode: str) ->
 def run(seasons: list[int] | None = None,
         datasets: list[Dataset] | None = None,
         mode: str = "overwrite") -> dict[str, int]:
-    """Ingest all (or a subset of) datasets to local Bronze Delta tables.
-
-    mode="overwrite" (default locally): reproducible re-runs, no duplicates.
-    mode="append":    true Bronze immutability (duplicates on re-run; Silver dedupes).
-    """
+    # overwrite is the local default because you re-run constantly while developing.
+    # append is the "real" Bronze behaviour; the duplicates it creates are dropped in Silver.
     seasons = seasons or season_range()
     datasets = datasets or DATASETS
     batch_id = _new_batch_id()

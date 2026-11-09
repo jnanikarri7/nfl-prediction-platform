@@ -1,27 +1,18 @@
-"""Phase 5.5 — market-anchored distributional model (Tier-1 research refactor).
+"""Market-anchored margin model.
 
-Diagnosis (see docs/research.md): the baseline GBM (win AUC 0.67, Brier 0.23) is WORSE
-than the Vegas line it ingests (AUC 0.724, Brier ~0.19). The fix is not more features —
-it is to anchor to the market and calibrate. This module:
+The baseline classifiers in train.py score *worse* than the spread they're given as a
+feature -- they spend capacity re-learning the line. So instead:
 
-  1. Predicts the market RESIDUAL (actual_margin - spread_line), not the raw outcome, so the
-     model only expresses deviations from Vegas (shrunk by SHRINK).
-  2. Treats margin ~ Normal(mu, sigma) and derives BOTH win and cover probabilities analytically
-     (Stern 1991), instead of training separate classifiers.
-  3. Calibrates win probabilities with isotonic regression fit on an internal calibration season
-     (leakage-free), and reports Brier / log-loss / reliability — the metrics that matter for
-     betting — alongside AUC.
-  4. Uses a small, strongly-regularized tree with early-stopping; in the residual framing the
-     anchoring itself limits market-fighting, so we rely on regularization + shrinkage (documented).
+  - regress the residual (result - spread_line) and shrink it toward zero, i.e. only
+    express disagreement with the market;
+  - treat margin ~ Normal(spread + residual, sigma) and read win probability off the
+    CDF (Stern 1991) rather than training a separate classifier;
+  - isotonic-calibrate on a held-out season before scoring the test season.
 
-Walk-forward per test season N: train = [N-1-W, N-2], calibrate = N-1, test = N.
+Folds, per test season N: train [N-1-W, N-2], calibrate N-1, test N.
+See docs/research.md for the reasoning and numbers.
 """
 from __future__ import annotations
-
-import os
-import tempfile
-
-os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 import lightgbm as lgb
 import matplotlib
@@ -36,11 +27,26 @@ from scipy.stats import norm
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, roc_auc_score
 
-from .train import TRAIN_WINDOW, _mlflow_uri, feature_cols, load_modeling_df
+from .train import TRAIN_WINDOW, _mlflow_uri, feature_cols, load_modeling_df, save_plot
 
-SHRINK = 0.5           # pull the model's residual halfway toward the market (anchoring)
-MIN_SIGMA = 10.0       # guard against degenerate variance
-FIRST_TEST_SEASON = 2020  # needs W train seasons + 1 calibration season before it
+# Fixed, not tuned. If you sweep it, score on the calibration season, never the test one.
+SHRINK = 0.5
+# Stern measured ~13.9 pts for margin-vs-spread; the floor only bites on tiny train slices.
+MIN_SIGMA = 10.0
+FIRST_TEST_SEASON = 2020  # TRAIN_WINDOW train seasons + 1 calibration season after 2015
+
+
+def load_market_df() -> pl.DataFrame:
+    """Played, non-tie games with a closing spread -- the only rows this model can use."""
+    return load_modeling_df().filter(
+        pl.col("spread_line").is_not_null()
+        & pl.col("result").is_not_null()
+        & (pl.col("result") != 0)
+    )
+
+
+def residual_sigma(df: pl.DataFrame) -> float:
+    return max(float(np.std((df["result"] - df["spread_line"]).to_numpy())), MIN_SIGMA)
 
 
 def _normal_win_prob(mu: np.ndarray, sigma: float) -> np.ndarray:
@@ -54,7 +60,8 @@ def _metrics(y: np.ndarray, p: np.ndarray) -> dict:
 
 
 def _make_regressor(name: str):
-    """Small, strongly-regularized margin-residual regressor."""
+    # Deliberately weak: shallow trees, heavy L2, big leaves. The target is mostly noise
+    # around zero and anything expressive just fits that noise.
     if name == "lightgbm":
         return lgb.LGBMRegressor(n_estimators=400, learning_rate=0.02, num_leaves=15,
                                  max_depth=3, subsample=0.8, colsample_bytree=0.8,
@@ -65,31 +72,37 @@ def _make_regressor(name: str):
                             min_child_weight=10, tree_method="hist", random_state=42)
 
 
+def fit_residual_model(name: str, df: pl.DataFrame, feats: list[str]):
+    model = _make_regressor(name)
+    model.fit(df.select(feats).to_pandas(), (df["result"] - df["spread_line"]).to_numpy())
+    return model
+
+
+def residual_predict(model, part: pl.DataFrame, feats: list[str], sigma: float):
+    """Return (predicted home margin, raw home-win prob)."""
+    mu = part["spread_line"].to_numpy() + model.predict(part.select(feats).to_pandas()) * SHRINK
+    return mu, _normal_win_prob(mu, sigma)
+
+
 def _reliability_plot(y, p_raw, p_cal, title: str) -> str:
+    bins = np.linspace(0, 1, 11)
     plt.figure(figsize=(6, 6))
     plt.plot([0, 1], [0, 1], "k--", lw=1, label="perfect")
     for p, lab in [(p_raw, "raw"), (p_cal, "calibrated")]:
-        bins = np.linspace(0, 1, 11)
         idx = np.clip(np.digitize(p, bins) - 1, 0, 9)
-        xs, ys = [], []
-        for b in range(10):
-            m = idx == b
-            if m.sum() >= 10:
-                xs.append(p[m].mean())
-                ys.append(y[m].mean())
-        plt.plot(xs, ys, "o-", label=lab)
+        # Skip bins with <10 games; a 2-game bin at 100% just adds noise to the plot.
+        pts = [(p[idx == b].mean(), y[idx == b].mean())
+               for b in range(10) if (idx == b).sum() >= 10]
+        if pts:
+            plt.plot(*zip(*pts, strict=True), "o-", label=lab)
     plt.xlabel("predicted P(home win)")
     plt.ylabel("observed frequency")
     plt.title(title)
     plt.legend()
-    path = os.path.join(tempfile.gettempdir(), f"{title.replace(' ', '_')}.png")
-    plt.tight_layout()
-    plt.savefig(path, dpi=110)
-    plt.close()
-    return path
+    return save_plot(title)
 
 
-def _folds(df: pl.DataFrame, last_season: int):
+def folds(df: pl.DataFrame, last_season: int):
     for n in range(FIRST_TEST_SEASON, last_season + 1):
         tr = df.filter((pl.col("season") >= n - 1 - TRAIN_WINDOW) & (pl.col("season") <= n - 2))
         cal = df.filter(pl.col("season") == n - 1)
@@ -98,29 +111,20 @@ def _folds(df: pl.DataFrame, last_season: int):
             yield n, tr, cal, te
 
 
-def _residual_predict(model, part: pl.DataFrame, feats: list[str], sigma: float):
-    """Return (margin_mu, win_prob_raw) for a partition."""
-    mu_r = model.predict(part.select(feats).to_pandas()) * SHRINK
-    mu = part["spread_line"].to_numpy() + mu_r         # anchor + shrunk deviation
-    return mu, _normal_win_prob(mu, sigma)
-
-
 def _run_model(name: str, df: pl.DataFrame, feats: list[str], last_season: int) -> dict:
     oof_y, oof_raw, oof_cal = [], [], []
     with mlflow.start_run(run_name=f"market_{name}"):
         mlflow.log_params({"model": name, "framing": "market_residual_normal",
                            "shrink": SHRINK, "train_window": TRAIN_WINDOW})
-        for season, tr, cal, te in _folds(df, last_season):
-            sigma = max(float(np.std((tr["result"] - tr["spread_line"]).to_numpy())), MIN_SIGMA)
-            model = _make_regressor(name)
-            model.fit(tr.select(feats).to_pandas(), (tr["result"] - tr["spread_line"]).to_numpy())
+        for season, tr, cal, te in folds(df, last_season):
+            sigma = residual_sigma(tr)
+            model = fit_residual_model(name, tr, feats)
 
-            # Calibrate win prob on the internal calibration season (leakage-free).
-            _, cal_raw = _residual_predict(model, cal, feats, sigma)
+            _, cal_raw = residual_predict(model, cal, feats, sigma)
             iso = IsotonicRegression(out_of_bounds="clip")
             iso.fit(cal_raw, cal["home_win"].to_numpy())
 
-            _, te_raw = _residual_predict(model, te, feats, sigma)
+            _, te_raw = residual_predict(model, te, feats, sigma)
             te_cal = iso.predict(te_raw)
             y = te["home_win"].to_numpy()
             oof_y.append(y)
@@ -135,10 +139,9 @@ def _run_model(name: str, df: pl.DataFrame, feats: list[str], last_season: int) 
                             **{f"cal_{k}": v for k, v in m_cal.items()}})
         mlflow.log_artifact(_reliability_plot(y, raw, cal, f"market {name} reliability"))
 
-        # Final model on all available seasons -> registry.
-        full = df.filter(pl.col("home_win").is_not_null())
-        final = _make_regressor(name)
-        final.fit(full.select(feats).to_pandas(), (full["result"] - full["spread_line"]).to_numpy())
+        # TODO: the registered artifact is the bare regressor -- no sigma, no isotonic
+        # map. Anyone serving it has to rebuild both. Wrap all three in a pyfunc.
+        final = fit_residual_model(name, df.filter(pl.col("home_win").is_not_null()), feats)
         mlflow.sklearn.log_model(final, name="model", serialization_format="cloudpickle",
                                  registered_model_name="nfl_margin_market")
         print(f"  market_{name:9s} raw: AUC={m_raw['auc']:.4f} Brier={m_raw['brier']:.4f}  "
@@ -146,17 +149,12 @@ def _run_model(name: str, df: pl.DataFrame, feats: list[str], last_season: int) 
         return m_cal
 
 
-def _market_baseline(df: pl.DataFrame, last_season: int) -> dict:
-    """Pure closing-spread -> Normal CDF. Zero ML. The target to match."""
-    test = df.filter((pl.col("season") >= FIRST_TEST_SEASON) & pl.col("home_win").is_not_null()
-                     & pl.col("spread_line").is_not_null())
-    # Fit sigma on earlier seasons only.
-    tr = df.filter((pl.col("season") < FIRST_TEST_SEASON) & pl.col("result").is_not_null()
-                   & pl.col("spread_line").is_not_null())
-    sigma = max(float(np.std((tr["result"] - tr["spread_line"]).to_numpy())), MIN_SIGMA)
+def _market_baseline(df: pl.DataFrame) -> dict:
+    """Closing spread through the same Normal CDF, no ML. This is the bar."""
+    test = df.filter(pl.col("season") >= FIRST_TEST_SEASON)
+    sigma = residual_sigma(df.filter(pl.col("season") < FIRST_TEST_SEASON))
     y = test["home_win"].to_numpy()
-    p = _normal_win_prob(test["spread_line"].to_numpy(), sigma)
-    m = _metrics(y, p)
+    m = _metrics(y, _normal_win_prob(test["spread_line"].to_numpy(), sigma))
     with mlflow.start_run(run_name="market_baseline_normal"):
         mlflow.log_param("sigma", round(sigma, 3))
         mlflow.log_metrics(m)
@@ -168,18 +166,13 @@ def _market_baseline(df: pl.DataFrame, last_season: int) -> dict:
 def run() -> int:
     mlflow.set_tracking_uri(_mlflow_uri())
     mlflow.set_experiment("nfl_market_model")
-    # Played, non-tie, spread-present games only — the trainable/evaluable universe.
-    df = load_modeling_df().filter(
-        pl.col("spread_line").is_not_null()
-        & pl.col("result").is_not_null()
-        & (pl.col("result") != 0)
-    )
+    df = load_market_df()
     feats = feature_cols(df)
     last = int(df["season"].max())
     print(f"=== Market-anchored distributional model | test {FIRST_TEST_SEASON}-{last} ===")
-    base = _market_baseline(df, last)
+    base = _market_baseline(df)
     results = {m: _run_model(m, df, feats, last) for m in ("lightgbm", "xgboost")}
-    best = max(results, key=lambda m: -results[m]["brier"])  # lower Brier is better
+    best = min(results, key=lambda m: results[m]["brier"])
     print(f"\n[DONE] Best calibrated: market_{best} "
           f"(Brier {results[best]['brier']:.4f} vs market {base['brier']:.4f}, "
           f"AUC {results[best]['auc']:.4f} vs market {base['auc']:.4f}).")

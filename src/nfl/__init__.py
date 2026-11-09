@@ -1,8 +1,12 @@
-"""NFL Prediction Platform — local pipeline package.
+"""Local (polars + delta-rs) implementation of the NFL medallion pipeline.
 
-Mirrors the Databricks PySpark notebooks using polars + deltalake so the full
-medallion (Bronze -> Silver -> Gold) can be built and tested locally for $0,
-then run on Databricks unchanged in logic.
+The PySpark notebooks under databricks/notebooks/ follow the same logic, but they
+lag behind this package -- see the README's parity notes.
 """
+import os
+
+# MLflow 3 prints an "agent hint" banner on import; it clutters every CLI run.
+# Set here so any module importing mlflow after `nfl` gets it.
+os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 __version__ = "0.1.0"
