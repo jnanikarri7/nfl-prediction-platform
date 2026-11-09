@@ -1,22 +1,13 @@
-"""Phase 5 — MLOps training pipeline (local MLflow, LightGBM + XGBoost).
+"""Baseline GBMs (win / cover / margin) with walk-forward CV, tracked in MLflow.
 
-Design principles:
-  * Time-based WALK-FORWARD validation (train seasons [N-W, N-1], test season N).
-    Never random k-fold — that leaks the future into the past.
-  * Every run logged to MLflow: params, per-fold + aggregate metrics, feature
-    importance plot, model artifact. Best model registered to the Model Registry.
-  * The Vegas line is logged as a baseline run so model skill is judged against the
-    market, not in a vacuum.
-
-Local MLflow uses a sqlite backend (registry needs a DB) + ./mlruns artifacts —
-the same API you'd point at a Databricks tracking server.
+Walk-forward only: train on seasons [N-4, N-1], test on N. Random k-fold would let
+2023 games inform 2021 predictions. Vegas is logged as its own run in the same
+experiment so every model is read against the market.
 """
 from __future__ import annotations
 
 import os
 import tempfile
-
-os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 import lightgbm as lgb
 import matplotlib
@@ -37,8 +28,9 @@ from sklearn.metrics import (
 
 from .config import GOLD_DIR, REPO_ROOT
 
-TRAIN_WINDOW = 4           # seasons per training window (spec: N..N+3 -> test N+4)
-FIRST_TEST_SEASON = 2019   # first season we can test (needs 4 prior seasons)
+# 4 seasons ~ 1,000 games: enough for shallow trees, recent enough to reflect the current game.
+TRAIN_WINDOW = 4
+FIRST_TEST_SEASON = 2019   # 2015 + TRAIN_WINDOW
 
 BOOL_COLS = ["is_dome", "is_neutral_site"]
 MARKET_COLS = ["spread_line", "total_line"]
@@ -46,12 +38,23 @@ CONTEXT_COLS = ["div_game", "home_field_advantage", "temp", "wind"]
 
 
 def _mlflow_uri() -> str:
-    return f"sqlite:///{(REPO_ROOT / 'mlflow.db').as_posix()}"
+    # Local registry needs a DB backend, hence sqlite rather than ./mlruns.
+    # Set MLFLOW_TRACKING_URI (e.g. "databricks") to log to a workspace instead.
+    return os.environ.get("MLFLOW_TRACKING_URI") or f"sqlite:///{(REPO_ROOT / 'mlflow.db').as_posix()}"
+
+
+def save_plot(title: str) -> str:
+    """Save the current matplotlib figure to a temp PNG for mlflow.log_artifact."""
+    path = os.path.join(tempfile.gettempdir(), f"{title.replace(' ', '_')}.png")
+    plt.tight_layout()
+    plt.savefig(path, dpi=110)
+    plt.close()
+    return path
 
 
 def load_modeling_df() -> pl.DataFrame:
     g = pl.read_delta(str(GOLD_DIR / "game_features"))
-    # Cast bools to int8 so both tree libs accept them.
+    # int8 rather than bool so LightGBM and XGBoost see the same dtype.
     return g.with_columns([pl.col(c).cast(pl.Int8) for c in BOOL_COLS if c in g.columns])
 
 
@@ -60,7 +63,6 @@ def feature_cols(df: pl.DataFrame) -> list[str]:
     return diffs + MARKET_COLS + CONTEXT_COLS
 
 
-# ---- Vegas baselines --------------------------------------------------------
 def _american_to_prob(ml: float | None) -> float | None:
     if ml is None or np.isnan(ml):
         return None
@@ -68,15 +70,13 @@ def _american_to_prob(ml: float | None) -> float | None:
 
 
 def vegas_win_prob(df: pl.DataFrame) -> np.ndarray:
-    """De-vigged home win probability from the moneyline."""
+    """Home win prob from the moneylines, vig removed by normalizing the pair."""
     hp = df["home_moneyline"].map_elements(_american_to_prob, return_dtype=pl.Float64).to_numpy()
     ap = df["away_moneyline"].map_elements(_american_to_prob, return_dtype=pl.Float64).to_numpy()
     return hp / (hp + ap)
 
 
-# ---- Walk-forward -----------------------------------------------------------
 def walk_forward(df: pl.DataFrame, target: str, last_season: int):
-    """Yield (test_season, train_df, test_df) with a sliding TRAIN_WINDOW."""
     d = df.filter(pl.col(target).is_not_null())
     for test_season in range(FIRST_TEST_SEASON, last_season + 1):
         train = d.filter((pl.col("season") >= test_season - TRAIN_WINDOW)
@@ -86,7 +86,6 @@ def walk_forward(df: pl.DataFrame, target: str, last_season: int):
             yield test_season, train, test
 
 
-# ---- Model factories --------------------------------------------------------
 def _make_model(name: str, task: str):
     if name == "lightgbm":
         cls = lgb.LGBMRegressor if task == "reg" else lgb.LGBMClassifier
@@ -106,14 +105,9 @@ def _importance_plot(model, feats: list[str], title: str) -> str:
     plt.figure(figsize=(7, 6))
     plt.barh([feats[i] for i in order], imp[order])
     plt.title(title)
-    plt.tight_layout()
-    path = os.path.join(tempfile.gettempdir(), f"{title.replace(' ', '_')}.png")
-    plt.savefig(path, dpi=110)
-    plt.close()
-    return path
+    return save_plot(title)
 
 
-# ---- Training routines ------------------------------------------------------
 def _train_classification(name: str, target: str, df: pl.DataFrame,
                           feats: list[str], last_season: int) -> dict:
     oof_y, oof_p = [], []
@@ -137,7 +131,7 @@ def _train_classification(name: str, target: str, df: pl.DataFrame,
                    "accuracy": accuracy_score(y, (p >= 0.5).astype(int))}
         mlflow.log_metrics(metrics)
 
-        # Final model on all trainable seasons -> artifact + importance + registry.
+        # CV metrics come from the folds; the registered model is refit on everything.
         full = df.filter(pl.col(target).is_not_null())
         final = _make_model(name, "clf")
         final.fit(full.select(feats).to_pandas(), full[target].to_numpy())
@@ -180,7 +174,6 @@ def _train_regression(name: str, df: pl.DataFrame, feats: list[str],
 
 def _log_vegas_baseline(df: pl.DataFrame, last_season: int) -> None:
     with mlflow.start_run(run_name="vegas_baseline"):
-        # Win: moneyline implied prob on the same test seasons.
         test = df.filter((pl.col("season") >= FIRST_TEST_SEASON)
                          & (pl.col("home_win").is_not_null())
                          & pl.col("home_moneyline").is_not_null())
@@ -189,7 +182,7 @@ def _log_vegas_baseline(df: pl.DataFrame, last_season: int) -> None:
         mlflow.log_metrics({"win_auc": roc_auc_score(y, p),
                             "win_logloss": log_loss(y, p),
                             "win_accuracy": accuracy_score(y, (p >= 0.5).astype(int))})
-        # Margin: the spread line IS Vegas's margin prediction.
+        # spread_line is home-positive in nflverse, same sign convention as result.
         tm = df.filter((pl.col("season") >= FIRST_TEST_SEASON)
                        & pl.col("target_margin").is_not_null()
                        & pl.col("spread_line").is_not_null())

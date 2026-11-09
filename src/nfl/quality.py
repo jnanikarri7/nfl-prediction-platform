@@ -1,9 +1,5 @@
-"""Lightweight data-quality framework (local analogue of Great Expectations).
-
-Each `expect_*` returns a QualityResult. A `DataQualityReport` collects them,
-prints a readable summary, and can hard-fail the pipeline on any violation —
-the same contract a Great Expectations suite enforces on Databricks.
-"""
+"""Minimal Great-Expectations-style checks: collect results, print them, and raise
+before a bad table gets written. Four checks didn't justify pulling in GE itself."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -45,7 +41,6 @@ class DataQualityReport:
             raise ValueError(f"[{self.dataset}] data quality failed: {msgs}")
 
 
-# ---- Expectations -----------------------------------------------------------
 def expect_unique(df: pl.DataFrame, cols: list[str]) -> QualityResult:
     dupes = df.height - df.select(cols).n_unique()
     return QualityResult("unique", "+".join(cols), dupes == 0, f"{dupes} duplicate keys")

@@ -1,15 +1,8 @@
-"""Load the registered champion model and run inference.
+"""Score upcoming games with whatever model holds the `champion` alias.
 
-Demonstrates the serving side of the MLOps loop: pull a model from the MLflow
-registry by alias (not a file path), score it, and produce predictions for
-upcoming (unplayed) games. Also back-tests on the latest completed season as a
-smoke test that the registered artifact loads and performs as logged.
+Loading by alias means promoting a new model is a registry operation, not a code change.
 """
 from __future__ import annotations
-
-import os
-
-os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
 import mlflow
 import polars as pl
@@ -17,20 +10,21 @@ from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 
 from .train import _mlflow_uri, feature_cols, load_modeling_df
 
+# TODO: this is still the Phase 5 classifier. The market model (nfl_margin_market) is
+# better calibrated, but it can't be served until sigma + isotonic ship with it.
 CHAMPION_URI = "models:/nfl_home_win@champion"
 
 
 def _load_champion():
     mlflow.set_tracking_uri(_mlflow_uri())
-    model = mlflow.sklearn.load_model(CHAMPION_URI)
-    return model
+    return mlflow.sklearn.load_model(CHAMPION_URI)
 
 
 def smoke_test(model, df: pl.DataFrame, feats: list[str]) -> None:
-    """IN-SAMPLE smoke test: confirms the registered artifact loads and scores.
-    The champion is trained on all completed games, so these numbers are optimistic
-    (not a fair estimate). The honest out-of-sample performance is the Phase-5
-    walk-forward result (~0.67 AUC). Use `scripts/run_train.py` for OOS metrics.
+    """Check the registered artifact loads and scores sanely.
+
+    In-sample: the champion was refit on every completed game, so these numbers are
+    optimistic by construction. Real OOS numbers come from run_train.py.
     """
     last = int(df.filter(pl.col("home_win").is_not_null())["season"].max())
     test = df.filter((pl.col("season") == last) & pl.col("home_win").is_not_null())

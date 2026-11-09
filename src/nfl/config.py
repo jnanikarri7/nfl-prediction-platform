@@ -1,11 +1,8 @@
-"""Central config: paths, season range, and the dataset registry.
-
-Keeping the dataset registry in one place means Bronze (and later layers) iterate
-over a single source of truth — add a dataset here and it flows everywhere.
-"""
+"""Paths, season range, and the Bronze dataset registry."""
 from __future__ import annotations
 
 import datetime as dt
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,31 +10,31 @@ from pathlib import Path
 import nflreadpy as nfl
 import polars as pl
 
-# ---- Paths (local lake) -----------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = REPO_ROOT / "data"
+# Override to keep the lake off the repo drive.
+DATA_DIR = Path(os.environ.get("NFL_DATA_DIR", REPO_ROOT / "data"))
 BRONZE_DIR = DATA_DIR / "bronze"
 SILVER_DIR = DATA_DIR / "silver"
 GOLD_DIR = DATA_DIR / "gold"
 
-# ---- Seasons ----------------------------------------------------------------
 START_SEASON = 2015
-END_SEASON = dt.date.today().year  # "present"
-NGS_FIRST_SEASON = 2016  # NFL did not publish Next Gen Stats before 2016
+# TODO: in Jan/Feb this asks for a season that hasn't kicked off yet (playoffs belong to
+# the previous year). Untested what nflreadpy does then; pass --end explicitly to be safe.
+END_SEASON = dt.date.today().year
+NGS_FIRST_SEASON = 2016  # NGS starts in 2016
 
 
 def season_range(start: int = START_SEASON, end: int = END_SEASON) -> list[int]:
     return list(range(start, end + 1))
 
 
-# ---- Dataset registry -------------------------------------------------------
 @dataclass(frozen=True)
 class Dataset:
-    name: str                              # bronze table folder name
-    loader: Callable[[list[int]], pl.DataFrame]  # seasons -> polars DataFrame
-    source_file: str                       # lineage tag
+    name: str                                    # folder under data/bronze/
+    loader: Callable[[list[int]], pl.DataFrame]
+    source_file: str                             # written to _source_file
     partition_by: tuple[str, ...] = ("season",)
-    first_season: int | None = None        # clamp (e.g. NGS -> 2016+)
+    first_season: int | None = None              # earlier seasons are skipped
 
 
 def _ngs(stat_type: str) -> Callable[[list[int]], pl.DataFrame]:
